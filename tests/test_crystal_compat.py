@@ -1,48 +1,63 @@
 from types import SimpleNamespace
+import numpy as np
+import pytest
 
 from app.crystal import _possible_termination_shifts
+
+
+def fake_generator(positions, height=10.0):
+    coordinates = np.zeros((len(positions), 3))
+    coordinates[:, 2] = positions
+
+    class Generator:
+        oriented_unit_cell = SimpleNamespace(frac_coords=coordinates)
+        _proj_height = height
+
+        def get_slabs(self, *args, **kwargs):
+            raise AssertionError("get_slabs must never be called to list terminations")
+
+    return Generator()
 
 
 def test_termination_shifts_new_public_api():
     class Generator:
         def gen_possible_terminations(self):
-            return [0.125, 0.625]
+            return [0.625, 0.125]
 
     assert _possible_termination_shifts(Generator()) == [0.125, 0.625]
 
 
-def test_termination_shifts_legacy_private_api():
-    class Generator:
-        def _calculate_possible_shifts(self, tol=0.1):
-            assert tol == 0.1
-            return [0.2, 0.7]
-
-    assert _possible_termination_shifts(Generator()) == [0.2, 0.7]
+def test_termination_shifts_legacy_fast_midplane_fallback():
+    gen = fake_generator([0.0, 0.5])
+    assert _possible_termination_shifts(gen) == pytest.approx([0.25, 0.75])
 
 
-def test_termination_shifts_old_get_slabs_fallback():
-    class Generator:
-        def get_slabs(self, filter_out_sym_slabs=True):
-            assert filter_out_sym_slabs is True
-            return [SimpleNamespace(shift=0.15), SimpleNamespace(shift=0.65)]
-
-    assert _possible_termination_shifts(Generator()) == [0.15, 0.65]
+def test_termination_shifts_groups_nearly_coplanar_atoms():
+    gen = fake_generator([0.0, 0.0001, 0.5, 0.5001])
+    assert _possible_termination_shifts(gen) == pytest.approx([0.25005, 0.75005])
 
 
-def test_termination_shifts_very_old_get_slabs_signature():
-    class Generator:
-        def get_slabs(self):
-            return [SimpleNamespace(shift=0.3), SimpleNamespace(shift=0.8)]
-
-    assert _possible_termination_shifts(Generator()) == [0.3, 0.8]
+def test_termination_shifts_clusters_across_periodic_seam():
+    gen = fake_generator([0.99, 0.01, 0.5], height=4.0)
+    assert _possible_termination_shifts(gen) == pytest.approx([0.25, 0.75])
 
 
-def test_termination_shifts_deduplicate_near_equal_values():
-    class Generator:
-        def gen_possible_terminations(self):
-            return [0.1, 0.1 + 1e-12, 0.6]
+def test_termination_shifts_single_layer():
+    gen = fake_generator([0.15])
+    assert _possible_termination_shifts(gen) == pytest.approx([0.65])
 
-    assert _possible_termination_shifts(Generator()) == [0.1, 0.6]
+
+def test_termination_shifts_empty_cell():
+    gen = fake_generator([])
+    assert _possible_termination_shifts(gen) == []
+
+
+def test_termination_shifts_many_sites_without_slabs():
+    gen = fake_generator(np.repeat(np.arange(16) / 16, 100), height=32.0)
+    shifts = _possible_termination_shifts(gen)
+    assert len(shifts) == 16
+    assert shifts[0] == pytest.approx(1 / 32)
+    assert shifts[-1] == pytest.approx(31 / 32)
 
 
 def test_surface_generator_requests_primitive_slab(monkeypatch):

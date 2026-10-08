@@ -1,4 +1,4 @@
-# Interface Matcher 0.2.3
+# Interface Matcher 0.2.4
 
 Standalone PySide6 prototype for coherent film/substrate interface matching.
 
@@ -16,7 +16,10 @@ Standalone PySide6 prototype for coherent film/substrate interface matching.
 - Show candidate area, atom count, rotation, strain components and integer transformation matrices.
 - Build an atomistic interface from the selected match.
 - Adjustable interface gap, vacuum and fractional in-plane registry offset.
-- Interactive OpenGL structure preview using **unit-cell-gui 0.2.x**.
+- Interactive instanced OpenGL preview using **unit-cell-gui 0.2.3**.
+- Background **Find terminations** (window stays responsive while the oriented
+  cell is prepared); older pymatgen versions do not create and compare complete
+  slabs merely to enumerate candidate shifts.
 - Optional preview limit to **N atomic layers per material nearest the interface**. This affects only rendering, not the built structure.
 - Export the complete resulting structure to CIF.
 - Calculate a Cu Kα XRD stick pattern of the complete periodic interface supercell.
@@ -39,7 +42,7 @@ If you are updating an existing Interface Matcher virtual environment from 0.1.x
 install the new viewer dependency once:
 
 ```powershell
-pip install "unit-cell-gui>=0.2.2,<0.3"
+pip install "unit-cell-gui>=0.2.3,<0.3"
 ```
 
 ## Run
@@ -87,6 +90,23 @@ It does **not** remove atoms from:
 `app/structure_view.py` converts the already-built pymatgen structure into a `unit_cell_gui.Scene`.
 The first integration renders atoms, unit-cell edges and basis vectors. Bond and polyhedron inference
 are intentionally left outside the renderer and can be added later without changing the matching engine.
+
+Version 0.2.4 removes the old monkeypatch of `unit_cell_gui.opengl_viewer.sphere_mesh`.
+The newer viewer uses GPU-instanced atom meshes, so patching its private rendering
+internals is both ineffective and fragile. Interface Matcher now relies only on
+public renderer APIs (`UnitCellViewer`, `Scene`, `DisplayOptions`).
+
+**CIF parsing warnings** about fractional coordinates rounded to ideal values
+are not fatal. A search that genuinely fails will show an error dialog, while a
+running `Find terminations` job reports its progress in the status bar.
+
+### 0.2.4 fixes
+
+- Run termination enumeration in a `QThread` instead of blocking the main GUI.
+- Avoid the historical `get_slabs()` fallback, which could hang on structure
+  grouping for large/slightly imperfect CIF files. On older pymatgen versions,
+  shifts are derived directly from the oriented unit cell and periodic layers.
+- Keep the newer `unit-cell-gui` GPU instancing and remove renderer monkeypatching.
 
 ## Important physical limitation
 

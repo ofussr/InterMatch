@@ -52,40 +52,67 @@ def _unique_float_values(values, *, atol: float = 1e-10) -> list[float]:
 
 
 def _possible_termination_shifts(gen) -> list[float]:
-    """Get termination shifts across old and new pymatgen releases.
+    """List termination shifts WITHOUT building and comparing every slab.
 
-    pymatgen-core 2026.8.13 made ``SlabGenerator.gen_possible_terminations``
-    public. Older pymatgen versions either expose the same calculation through
-    the private ``_calculate_possible_shifts`` helper or only through
-    ``get_slabs()``, whose returned ``Slab`` objects carry their ``shift``.
-
-    Keeping all three paths here lets Interface Matcher work with existing
-    pymatgen installations instead of requiring a specific recent release.
+    Recent pymatgen versions offer a lightweight public method. On older
+    versions compute mid-gaps between atomic layers in the oriented unit cell
+    directly. Crucially, never call ``get_slabs`` here: that method constructs
+    many full slabs and may spend minutes in StructureMatcher for a complex CIF.
     """
     public = getattr(gen, "gen_possible_terminations", None)
     if callable(public):
-        return _unique_float_values(public())
+        return sorted(_unique_float_values(public()))
 
-    private = getattr(gen, "_calculate_possible_shifts", None)
-    if callable(private):
-        try:
-            return _unique_float_values(private(tol=0.1))
-        except TypeError:
-            # Some historical releases used a different/no explicit signature.
-            return _unique_float_values(private())
+    oriented = getattr(gen, "oriented_unit_cell", None)
+    if oriented is None:
+        raise RuntimeError("SlabGenerator has no oriented_unit_cell")
 
-    # Last-resort public API for older pymatgen versions.  get_slabs() has
-    # generated unique terminations for many years and each Slab stores the
-    # fractional c shift used to create it.
-    try:
-        slabs = gen.get_slabs(filter_out_sym_slabs=True)
-    except TypeError:
-        # Very old releases do not have filter_out_sym_slabs.
-        slabs = gen.get_slabs()
+    coordinates = np.asarray(oriented.frac_coords, dtype=float)
+    if coordinates.ndim != 2 or coordinates.shape[1] != 3:
+        raise ValueError("Invalid oriented unit-cell coordinates")
+    if len(coordinates) == 0:
+        return []
 
-    return _unique_float_values(
-        slab.shift for slab in slabs if hasattr(slab, "shift")
-    )
+    z = np.sort(np.mod(coordinates[:, 2], 1.0))
+    if len(z) == 1:
+        return [float((z[0] + 0.5) % 1.0)]
+
+    height = getattr(gen, "_proj_height", None)
+    if height is None:
+        lattice = np.asarray(oriented.lattice.matrix, dtype=float)
+        height = abs(np.linalg.det(lattice)) / np.linalg.norm(
+            np.cross(lattice[0], lattice[1])
+        )
+    height = float(height)
+    if not np.isfinite(height) or height <= 0:
+        raise ValueError("Invalid projected cell height")
+
+    # Cluster adjacent atomic heights across the periodic boundary.  This is
+    # a one-dimensional O(N log N) procedure, not an O(N²) slab comparison.
+    threshold_fractional = min(0.49, 0.1 / height)
+    gaps = np.diff(np.r_[z, z[0] + 1.0])
+    boundaries = np.flatnonzero(gaps > threshold_fractional)
+    if len(boundaries) == 0:
+        # One periodic atomic layer spanning the entire c period.
+        angle = np.angle(np.mean(np.exp(2j * np.pi * z)))
+        return [float((angle / (2 * np.pi) + 0.5) % 1.0)]
+
+    # Start immediately after a cluster boundary, then walk cyclically.
+    start = (int(boundaries[0]) + 1) % len(z)
+    groups: list[list[float]] = []
+    group: list[float] = []
+    for offset in range(len(z)):
+        idx = (start + offset) % len(z)
+        group.append(float(z[idx]))
+        if gaps[idx] > threshold_fractional:
+            groups.append(group)
+            group = []
+
+    centers = sorted(float(np.angle(np.mean(np.exp(2j * np.pi * np.asarray(group))))
+                           / (2 * np.pi) % 1.0) for group in groups)
+    shifts = [(first + second) / 2 for first, second in zip(centers, centers[1:])]
+    shifts.append(((centers[-1] + centers[0] + 1.0) / 2.0) % 1.0)
+    return sorted(_unique_float_values(shifts))
 
 
 def _make_slab_generator(structure, hkl, slab_thickness: float):

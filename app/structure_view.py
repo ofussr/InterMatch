@@ -29,31 +29,13 @@ _JMOL_COLOURS = {
 
 
 def install_fast_interface_preview_profile() -> None:
-    """Use a lighter atom mesh for large interface supercells.
+    """Compatibility no-op for callers from previous releases.
 
-    unit-cell-gui deliberately owns rendering while the host owns scene
-    preparation.  Its default atom sphere is tuned for ordinary unit cells.
-    Interface supercells can contain hundreds of sites, so this application
-    substitutes a lower-tessellation sphere generator before the viewer is
-    instantiated.  Rendering behaviour and the public unit-cell-gui API stay
-    unchanged; only the number of triangles per atom is reduced.
+    unit-cell-gui 0.2.3 renders atoms by GPU instancing. Replacing the module's
+    private ``sphere_mesh`` function no longer changes atom geometry and risks
+    breaking future renderer versions. Do not monkeypatch renderer internals.
     """
-    import unit_cell_gui.opengl_viewer as gl_viewer
-    from unit_cell_gui.gl_geometry import sphere_mesh as base_sphere_mesh
-
-    if getattr(gl_viewer, "_interface_matcher_fast_spheres", False):
-        return
-
-    def fast_sphere_mesh(center, radius, **_kwargs):
-        return base_sphere_mesh(
-            center,
-            radius,
-            latitude_segments=8,
-            longitude_segments=12,
-        )
-
-    gl_viewer.sphere_mesh = fast_sphere_mesh
-    gl_viewer._interface_matcher_fast_spheres = True
+    return None
 
 
 def _element_symbol(specie) -> str:

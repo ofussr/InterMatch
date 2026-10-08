@@ -5,7 +5,7 @@ import traceback
 
 import numpy as np
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -42,7 +42,6 @@ from .crystal import build_surface, possible_terminations
 from .interface_builder import build_interface, save_cif
 from .matcher import find_matches, matrix_text
 from .structure_view import (
-    install_fast_interface_preview_profile,
     interface_layer_indices,
     scene_from_structure,
 )
@@ -56,16 +55,41 @@ class PlotCanvas(FigureCanvas):
         super().__init__(self.figure)
 
 
+class TerminationsWorker(QObject):
+    """Enumerate termination planes without blocking Qt's event loop."""
+
+    completed = Signal(object)
+
+    def __init__(self, job_id: int, path: str, hkl: tuple[int, int, int], thickness: float):
+        super().__init__()
+        self.job_id = job_id
+        self.path = path
+        self.hkl = hkl
+        self.thickness = thickness
+
+    @Slot()
+    def run(self):
+        try:
+            shifts = possible_terminations(
+                self.path, self.hkl, slab_thickness=self.thickness
+            )
+            self.completed.emit((self.job_id, True, shifts))
+        except Exception as exc:
+            traceback.print_exc()
+            self.completed.emit((self.job_id, False, str(exc)))
+
+
 class InterfaceMatcherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Interface Matcher 0.2.3")
+        self.setWindowTitle("Interface Matcher 0.2.4")
         self.resize(1450, 900)
 
         self.film_surface = None
         self.substrate_surface = None
         self.matches = []
         self.built = None
+        self._termination_jobs = {}
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -85,7 +109,6 @@ class InterfaceMatcherWindow(QMainWindow):
         controls_layout.addStretch(1)
 
         self.tabs = QTabWidget()
-        install_fast_interface_preview_profile()
         self.structure_view = UnitCellViewer()
         self.structure_view.set_display_options(
             DisplayOptions(
@@ -186,6 +209,7 @@ class InterfaceMatcherWindow(QMainWindow):
             "l": l,
             "thickness": thickness,
             "termination": termination,
+            "term_btn": term_btn,
         }
         if film:
             self.film_ui = attrs
@@ -319,16 +343,73 @@ class InterfaceMatcherWindow(QMainWindow):
         return float(text)
 
     def _fill_terminations(self, ui):
-        try:
-            shifts = possible_terminations(
-                ui["path"].text(), self._hkl(ui), slab_thickness=ui["thickness"].value()
-            )
-            ui["termination"].clear()
-            for shift in shifts:
-                ui["termination"].addItem(f"{shift:.8f}")
-            self.statusBar().showMessage(f"Found {len(shifts)} possible termination(s)")
-        except Exception as exc:
-            self._error(exc)
+        key = id(ui)
+        if key in self._termination_jobs:
+            return
+
+        path = ui["path"].text().strip()
+        hkl = self._hkl(ui)
+        thickness = ui["thickness"].value()
+        if not path:
+            QMessageBox.warning(self, "Missing CIF", "Select a CIF file first.")
+            return
+        if hkl == (0, 0, 0):
+            QMessageBox.warning(self, "Invalid plane", "Miller indices (0 0 0) are invalid.")
+            return
+
+        thread = QThread(self)
+        worker = TerminationsWorker(key, path, hkl, thickness)
+        worker.moveToThread(thread)
+        snapshot = (path, hkl, thickness)
+        self._termination_jobs[key] = (thread, worker, ui, snapshot)
+        ui["term_btn"].setEnabled(False)
+        ui["term_btn"].setText("Finding…")
+        self.statusBar().showMessage("Finding termination planes in background…")
+
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._on_terminations_completed)
+        worker.completed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda job_key=key: self._termination_jobs.pop(job_key, None))
+        thread.start()
+
+    @Slot(object)
+    def _on_terminations_completed(self, result):
+        job_id, ok, payload = result
+        job = self._termination_jobs.get(job_id)
+        if job is None:
+            return
+        _thread, _worker, ui, snapshot = job
+        ui["term_btn"].setEnabled(True)
+        ui["term_btn"].setText("Find terminations")
+        if not ok:
+            QMessageBox.critical(self, "Termination search failed", payload)
+            self.statusBar().showMessage("Termination search failed")
+            return
+
+        current = (ui["path"].text().strip(), self._hkl(ui), ui["thickness"].value())
+        if current != snapshot:
+            self.statusBar().showMessage("Termination results discarded: CIF or plane changed")
+            return
+
+        shifts = payload
+        previous = ui["termination"].currentText()
+        selector = ui["termination"]
+        selector.clear()
+        selector.addItem("auto")
+        for shift in shifts:
+            selector.addItem(f"{shift:.8f}")
+        matches_previous = selector.findText(previous)
+        selector.setCurrentIndex(matches_previous if matches_previous >= 0 else 0)
+        self.statusBar().showMessage(f"Found {len(shifts)} possible termination(s)")
+
+    def closeEvent(self, event):
+        if self._termination_jobs:
+            self.statusBar().showMessage("Please wait for termination search to finish before closing")
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _find_matches(self):
         try:
